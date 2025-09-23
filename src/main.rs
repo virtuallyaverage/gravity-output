@@ -13,12 +13,6 @@ static PARTICLES: LazyLock<RwLock<Vec<Particle>>> = LazyLock::new(|| {
     println!("Done with particle init");
     RwLock::new(particles)
 });
-static ACC_FORCE: LazyLock<RwLock<Vec<Vec3>>> = LazyLock::new(|| {
-    let acc_forces = [Vec3::ZERO; NUM_PARTICLES];
-    println!("Done with forces init");
-    RwLock::new(acc_forces.to_vec())
-});
-
 
 pub const NUM_PARTICLES: usize = 12000;
 pub const FRAMES_TOTAL: usize = 10000;
@@ -56,20 +50,12 @@ fn process_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: usize) {
             .map(|idx| one_particle(idx))
             .collect();
 
-        // Store forces in the global array (if you need it for other purposes)
-        {
-            let mut acc_forces = ACC_FORCE.write().unwrap();
-            for (idx, force) in forces.iter().enumerate() {
-                acc_forces[idx] = *force;
-            }
-        } // Release the lock early
-
-        // propagate force and store result
+        // propagate force and store result (removed ACC_FORCE storage)
         {
             let mut particles = PARTICLES.write().unwrap();
             for (idx, out_pos) in frame.iter_mut().enumerate() {
                 let part = particles.get_mut(idx).unwrap();
-                let force = &forces[idx]; // Use forces instead of getting from acc_forces
+                let force = &forces[idx];
                 part.tick(force);
                 *out_pos = part.pos;
             }
@@ -102,18 +88,25 @@ fn write_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: &usize) {
 /// Finds how all other particles interact with this one
 /// Returns the resulting force vector
 fn one_particle(idx: usize) -> Vec3 {
-    let mut force = Vec3::ZERO;
     let particles = PARTICLES.read().unwrap();
-    let particle = particles.get(idx).unwrap();
+    let particle = &particles[idx]; // Direct indexing instead of get()
+    let particle_pos = particle.pos;
+    let particle_mass = particle.mass;
 
-    for (idx2, part) in particles.iter().enumerate() {
-        if idx == idx2 { // skip own particles force (really big number)
+    let mut force = Vec3::ZERO;
+    for (idx2, other) in particles.iter().enumerate() {
+        if idx == idx2 {
             continue;
         }
-        force += particle.get_influence(part);
+        
+        // Inline the force calculation to avoid function call overhead
+        let r_vec = other.pos - particle_pos;
+        let r_sq = r_vec.dot(r_vec).max(1e-8);
+        let force_over_r3 = G_CONST * particle_mass * other.mass / (r_sq * r_sq.sqrt());
+        force += r_vec * force_over_r3;
     }
 
-    return force;
+    force
 }
 
 /// handles initial distribution and whatnot
