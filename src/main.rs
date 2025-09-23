@@ -1,5 +1,6 @@
 use std::sync::{Arc, LazyLock, RwLock};
 use std::io::Write;
+use std::time::{Duration, Instant};
 use rand::prelude::*;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -18,30 +19,38 @@ static ACC_FORCE: LazyLock<RwLock<Vec<Vec3>>> = LazyLock::new(|| {
 });
 
 
-pub const NUM_PARTICLES: usize = 6000;
-pub const FRAMES_TOTAL: usize = 600;
-pub const FRAMES_PER_FILE: usize = 50;
-pub const DT: f32 = 1.0 / 60.0;
+pub const NUM_PARTICLES: usize = 12000;
+pub const FRAMES_TOTAL: usize = 10000;
+pub const FRAMES_PER_FILE: usize = 100;
+pub const DT: f32 = 1.0 / 180.0;
 /// radius the particles will be spawned within
-const ARENA: f32 = 3000.0;
-pub const G_CONST: f32 = 6.67430e-11;
+const ARENA: f32 = 100.0;
+pub const G_CONST: f32 = 0.01; // bigger means stronger pull
 
 fn main() {
-    let mut frame_list = Box::new([[Vec3::ZERO; NUM_PARTICLES]; FRAMES_PER_FILE]);
+    let mut frame_list: Vec<Vec<Vec3>> = vec![vec![Vec3::ZERO; NUM_PARTICLES]; FRAMES_PER_FILE];
 
-    for batch in 0..FRAMES_TOTAL {
+    let num_batches = FRAMES_TOTAL / FRAMES_PER_FILE;
+    for batch in 0..num_batches {
+        let time_start = Instant::now();
         process_frame_group(&mut frame_list, batch.clone());
-        println!("Done with batch {}, frames: {}",  batch.clone(), batch * FRAMES_PER_FILE);
+        println!("Done with batch: {}, frames: {}-{}, Seconds: {} per frame: {}", 
+                 batch, 
+                 batch * FRAMES_PER_FILE, 
+                 (batch + 1) * FRAMES_PER_FILE - 1,
+                 time_start.elapsed().as_secs_f32(),
+                time_start.elapsed().as_secs_f32() / FRAMES_PER_FILE as f32
+                );
     }
     
     println!("Hello, world!");
 }
 
 /// process a single files worth of frames.
-fn process_frame_group(frame_list: &mut Box<[[Vec3; NUM_PARTICLES]; FRAMES_PER_FILE]>, batch_num: usize) {
-    for (local_num, frame) in frame_list.iter_mut().enumerate() {
+fn process_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: usize) {
+    for frame in frame_list.iter_mut() {
         // accumulate force
-        for idx in 0..NUM_PARTICLES - 1 {
+        for idx in 0..NUM_PARTICLES {
             let force = one_particle(idx);
             let mut forces = ACC_FORCE.write().unwrap();
             let current = forces.get_mut(idx).unwrap();
@@ -54,23 +63,25 @@ fn process_frame_group(frame_list: &mut Box<[[Vec3; NUM_PARTICLES]; FRAMES_PER_F
         for (idx, out_pos) in frame.iter_mut().enumerate() {
             let part = particles.get_mut(idx).unwrap();
             let force = forces.get(idx).unwrap();
-            part.tick(force);
+            part.tick(force); // updates part.pos
             *out_pos = part.pos;
         }
     }
 
+    let start = Instant::now();
     write_frame_group(frame_list, &batch_num);
+    println!("Took to save: {}", start.elapsed().as_secs_f32());
 }
 
 // Write batch of frames
-fn write_frame_group(frame_list: &mut [[Vec3; NUM_PARTICLES]; FRAMES_PER_FILE], batch_num: &usize) {
+fn write_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: &usize) {
     let filename = format!("output/batch_{:04}.bin.gz", batch_num);
     let file = std::fs::File::create(filename).unwrap();
     let mut encoder = GzEncoder::new(file, Compression::fast());
     
-    // header
-    encoder.write_all(&FRAMES_PER_FILE.to_le_bytes()).unwrap();
-    encoder.write_all(&NUM_PARTICLES.to_le_bytes()).unwrap();
+    // header - convert to u32 for consistent 4-byte format
+    encoder.write_all(&(FRAMES_PER_FILE as u32).to_le_bytes()).unwrap();
+    encoder.write_all(&(NUM_PARTICLES as u32).to_le_bytes()).unwrap();
 
     for frame in frame_list.iter() {
         for pos in frame.iter() {
@@ -87,7 +98,10 @@ fn one_particle(idx: usize) -> Vec3 {
     let particles = PARTICLES.read().unwrap();
     let particle = particles.get(idx).unwrap();
 
-    for part in particles.iter() {
+    for (idx2, part) in particles.iter().enumerate() {
+        if idx == idx2 { // skip own particles force (really big number)
+            continue;
+        }
         force += particle.get_influence(part);
     }
 
@@ -98,10 +112,10 @@ fn one_particle(idx: usize) -> Vec3 {
 fn init_particles() -> Vec<Particle> {
     let mut rng = rand::rng();
     
-    (0..NUM_PARTICLES)
+    let mut out: Vec<Particle> = (0..NUM_PARTICLES -1)
         .map(|_| {
             // Random spherical distribution
-            let r = ARENA * rng.random::<f32>().powf(1.0/3.0); // Uniform volume distribution
+            let r = ARENA * (0.1 + 0.9 * rng.random::<f32>().powf(1.0/3.0)); // Avoid center
             let theta = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
             let phi = (rng.random::<f32>() * 2.0 - 1.0).acos();
             
@@ -111,17 +125,22 @@ fn init_particles() -> Vec<Particle> {
                 r * phi.cos(),
             );
             
-            // Orbital velocity perpendicular to position (creates rotation)
-            let speed = (50.0 / r.sqrt()).min(100.0); // Faster near center
+            // Calculate orbital velocity for a central mass system
+            // Assume most mass is concentrated at center for orbital calculation
+            let central_mass = NUM_PARTICLES as f32 * 100.0; // Approximate total mass at center
+            let orbital_speed = (G_CONST * central_mass / r).sqrt() * 0.7; // 0.7 factor for elliptical orbits
             let tangent = Vec3::new(-pos.y, pos.x, 0.0).normalize_or_zero();
-            let vel = tangent * speed;
+            let vel = tangent * orbital_speed;
             
-            // Random mass distribution (e.g., 1.0 to 10.0 units)
-            let mass = rng.random::<f32>() * 9.0 + 1.0;
+            // Smaller mass range for stability
+            let mass = rng.random::<f32>() * 50.0 + 50.0;
             
-            Particle::new(10000.0, pos, vel, Vec3::ZERO)
+            Particle::new(1000.0, pos, vel, Vec3::ZERO)
         })
-        .collect()
+        .collect();
+
+    out.push(Particle::new(100000., Vec3::ZERO, Vec3::ZERO, Vec3::ZERO));
+    return out;
 }
 
 pub struct Particle {
@@ -169,8 +188,11 @@ impl Particle {
     /// Propogate force accumulated over a tick into movement.
     pub fn tick(&mut self, force: &Vec3) {
         let new_acc = force / self.mass;
-        self.pos += self.vel * DT + 0.5 * self.acc * DT * DT;
-        self.vel += 0.5 * (self.acc + new_acc) * DT;
+        
+        // Simple Euler integration (more stable for this system)
+        self.vel += new_acc * DT;
+        self.pos += self.vel * DT;
+        
         self.acc = new_acc;
     }
 }
