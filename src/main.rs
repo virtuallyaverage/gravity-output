@@ -1,6 +1,6 @@
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{LazyLock, RwLock};
 use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use rand::prelude::*;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -43,13 +43,16 @@ fn main() {
 
 /// process a single files worth of frames.
 fn process_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: usize) {
+    let mut forces = vec![Vec3::ZERO; NUM_PARTICLES];
+
     for frame in frame_list.iter_mut() {
         // Parallel force accumulation
-        let forces: Vec<Vec3> = (0..NUM_PARTICLES)
-            .into_par_iter()
-            .map(|idx| one_particle(idx))
-            .collect();
-
+        forces
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, force)| {
+                *force = one_particle(idx);
+            });
         // propagate force and store result (removed ACC_FORCE storage)
         {
             let mut particles = PARTICLES.write().unwrap();
