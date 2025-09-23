@@ -6,6 +6,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use bytemuck;
 use glam::Vec3;
+use rayon::prelude::*;
 
 static PARTICLES: LazyLock<RwLock<Vec<Particle>>> = LazyLock::new(|| {
     let particles = init_particles();
@@ -49,22 +50,29 @@ fn main() {
 /// process a single files worth of frames.
 fn process_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: usize) {
     for frame in frame_list.iter_mut() {
-        // accumulate force
-        for idx in 0..NUM_PARTICLES {
-            let force = one_particle(idx);
-            let mut forces = ACC_FORCE.write().unwrap();
-            let current = forces.get_mut(idx).unwrap();
-            *current = force;
-        }
+        // Parallel force accumulation
+        let forces: Vec<Vec3> = (0..NUM_PARTICLES)
+            .into_par_iter()
+            .map(|idx| one_particle(idx))
+            .collect();
+
+        // Store forces in the global array (if you need it for other purposes)
+        {
+            let mut acc_forces = ACC_FORCE.write().unwrap();
+            for (idx, force) in forces.iter().enumerate() {
+                acc_forces[idx] = *force;
+            }
+        } // Release the lock early
 
         // propagate force and store result
-        let mut particles = PARTICLES.write().unwrap();
-        let forces = ACC_FORCE.read().unwrap();
-        for (idx, out_pos) in frame.iter_mut().enumerate() {
-            let part = particles.get_mut(idx).unwrap();
-            let force = forces.get(idx).unwrap();
-            part.tick(force); // updates part.pos
-            *out_pos = part.pos;
+        {
+            let mut particles = PARTICLES.write().unwrap();
+            for (idx, out_pos) in frame.iter_mut().enumerate() {
+                let part = particles.get_mut(idx).unwrap();
+                let force = &forces[idx]; // Use forces instead of getting from acc_forces
+                part.tick(force);
+                *out_pos = part.pos;
+            }
         }
     }
 
