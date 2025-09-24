@@ -1,57 +1,140 @@
-use std::sync::{LazyLock, RwLock};
-use std::io::Write;
-use std::time::Instant;
-use rand::prelude::*;
-use flate2::write::GzEncoder;
-use flate2::Compression;
 use bytemuck;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use glam::Vec3;
+use rand::prelude::*;
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::{LazyLock, RwLock};
+use std::time::Instant;
 
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Settings {
+    pub num_particles: usize,
+    pub frames_total: usize,
+    pub frames_per_file: usize,
+    pub dt: f32,
+    pub arena: f32,
+    pub g_const: f32,
+    pub mass: f32,
+    pub init_vel: f32,
+    pub out_path: PathBuf,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            num_particles: 12000,
+            frames_total: 10000,
+            frames_per_file: 100,
+            dt: 1.0 / 180.0,
+            arena: 100.0,
+            g_const: 0.01,
+            mass: 1000.,
+            init_vel: 4.5,
+            out_path: PathBuf::from(""), // initialized properly in load_settings
+        }
+    }
+}
+
+static SETTINGS: LazyLock<Settings> = LazyLock::new(|| load_settings());
 static PARTICLES: LazyLock<RwLock<Vec<Particle>>> = LazyLock::new(|| {
     let particles = init_particles();
     println!("Done with particle init");
     RwLock::new(particles)
 });
 
-pub const NUM_PARTICLES: usize = 12000;
-pub const FRAMES_TOTAL: usize = 10000;
-pub const FRAMES_PER_FILE: usize = 100;
-pub const DT: f32 = 1.0 / 180.0;
-/// radius the particles will be spawned within
-const ARENA: f32 = 100.0;
-pub const G_CONST: f32 = 0.01; // bigger means stronger pull
+fn load_settings() -> Settings {
+    let mut settings = match std::fs::read_to_string("settings.json") {
+        Ok(content) => match serde_json::from_str::<Settings>(&content) {
+            Ok(settings) => {
+                println!("Loaded settings from settings.json");
+                settings
+            }
+            Err(e) => {
+                println!("Error parsing settings.json: {}, using defaults", e);
+                create_default_settings()
+            }
+        },
+        Err(_) => {
+            println!("settings.json not found, creating with default values");
+            create_default_settings()
+        }
+    };
+
+    // resolve path flag
+    let args: Vec<String> = env::args().collect();
+    let output_path = args
+        .windows(2)
+        .find(|pair| pair[0] == "--output")
+        .map(|pair| PathBuf::from(&pair[1]))
+        .unwrap_or_else(|| PathBuf::from("output"));
+
+    // resolve to full path
+    let output_path = if output_path.is_absolute() {
+        output_path
+    } else {
+        env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(output_path)
+    };
+
+    settings.out_path = output_path;
+    std::fs::create_dir_all(settings.out_path.clone()).unwrap();
+    println!("{:?}", settings.out_path);
+    return settings;
+}
+
+fn create_default_settings() -> Settings {
+    let settings = Settings::default();
+    match serde_json::to_string_pretty(&settings) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write("settings.json", json) {
+                println!("Warning: Could not create settings.json: {}", e);
+            } else {
+                println!("Created settings.json with default values");
+            }
+        }
+        Err(e) => println!("Warning: Could not serialize settings: {}", e),
+    }
+    settings
+}
 
 fn main() {
-    let mut frame_list: Vec<Vec<Vec3>> = vec![vec![Vec3::ZERO; NUM_PARTICLES]; FRAMES_PER_FILE];
+    let mut frame_list: Vec<Vec<Vec3>> =
+        vec![vec![Vec3::ZERO; SETTINGS.num_particles]; SETTINGS.frames_per_file];
 
-    let num_batches = FRAMES_TOTAL / FRAMES_PER_FILE;
+    let num_batches = SETTINGS.frames_total / SETTINGS.frames_per_file;
     for batch in 0..num_batches {
         let time_start = Instant::now();
         process_frame_group(&mut frame_list, batch.clone());
-        println!("Done with batch: {}, frames: {}-{}, Seconds: {} per frame: {}", 
-                 batch, 
-                 batch * FRAMES_PER_FILE, 
-                 (batch + 1) * FRAMES_PER_FILE - 1,
-                 time_start.elapsed().as_secs_f32(),
-                time_start.elapsed().as_secs_f32() / FRAMES_PER_FILE as f32
-                );
+        println!(
+            "Done with batch: {}, frames: {}-{}, Seconds: {} per frame: {}",
+            batch,
+            batch * SETTINGS.frames_per_file,
+            (batch + 1) * SETTINGS.frames_per_file - 1,
+            time_start.elapsed().as_secs_f32(),
+            time_start.elapsed().as_secs_f32() / SETTINGS.frames_per_file as f32
+        );
     }
-    
-    println!("Hello, world!");
+
+    println!("Finished!");
 }
 
 /// process a single files worth of frames.
 fn process_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: usize) {
-    let mut forces = vec![Vec3::ZERO; NUM_PARTICLES];
+    let mut forces = vec![Vec3::ZERO; SETTINGS.num_particles];
 
     for frame in frame_list.iter_mut() {
         // Parallel force accumulation
         forces
             .par_iter_mut()
             .enumerate()
-            .for_each(|(idx, force)| {
-                *force = one_particle(idx);
+            .for_each(|(idx, force_ref): (usize, &mut Vec3)| {
+                *force_ref = one_particle(idx);
             });
         // propagate force and store result (removed ACC_FORCE storage)
         {
@@ -72,13 +155,17 @@ fn process_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: usize) {
 
 // Write batch of frames
 fn write_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: &usize) {
-    let filename = format!("output/batch_{:04}.bin.gz", batch_num);
+    let filename = SETTINGS.out_path.join(format!("batch_{:04}.bin.gz", batch_num));
     let file = std::fs::File::create(filename).unwrap();
     let mut encoder = GzEncoder::new(file, Compression::fast());
-    
+
     // header - convert to u32 for consistent 4-byte format
-    encoder.write_all(&(FRAMES_PER_FILE as u32).to_le_bytes()).unwrap();
-    encoder.write_all(&(NUM_PARTICLES as u32).to_le_bytes()).unwrap();
+    encoder
+        .write_all(&(SETTINGS.frames_per_file as u32).to_le_bytes())
+        .unwrap();
+    encoder
+        .write_all(&(SETTINGS.num_particles as u32).to_le_bytes())
+        .unwrap();
 
     for frame in frame_list.iter() {
         for pos in frame.iter() {
@@ -101,50 +188,43 @@ fn one_particle(idx: usize) -> Vec3 {
         if idx == idx2 {
             continue;
         }
-        
+
         // Inline the force calculation to avoid function call overhead
         let r_vec = other.pos - particle_pos;
         let r_sq = r_vec.dot(r_vec).max(1e-8);
-        let force_over_r3 = G_CONST * particle_mass * other.mass / (r_sq * r_sq.sqrt());
+        let force_over_r3 = SETTINGS.g_const * particle_mass * other.mass / (r_sq * r_sq.sqrt());
         force += r_vec * force_over_r3;
     }
 
     force
 }
 
-/// handles initial distribution and whatnot
+/// handles initial distribution and velocity
 fn init_particles() -> Vec<Particle> {
     let mut rng = rand::rng();
-    
-    let mut out: Vec<Particle> = (0..NUM_PARTICLES -1)
+
+    (0..SETTINGS.num_particles)
         .map(|_| {
             // Random spherical distribution
-            let r = ARENA * (0.1 + 0.9 * rng.random::<f32>().powf(1.0/3.0)); // Avoid center
+            let r = SETTINGS.arena * (rng.random::<f32>().powf(1.0 / 3.0)); // Avoid center
             let theta = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
             let phi = (rng.random::<f32>() * 2.0 - 1.0).acos();
-            
+
             let pos = Vec3::new(
                 r * phi.sin() * theta.cos(),
                 r * phi.sin() * theta.sin(),
                 r * phi.cos(),
             );
-            
+
             // Calculate orbital velocity for a central mass system
-            // Assume most mass is concentrated at center for orbital calculation
-            let central_mass = NUM_PARTICLES as f32 * 100.0; // Approximate total mass at center
-            let orbital_speed = (G_CONST * central_mass / r).sqrt() * 0.7; // 0.7 factor for elliptical orbits
+            let central_mass = SETTINGS.num_particles as f32 * 5.0; // random numbers go brrr
+            let orbital_speed = (SETTINGS.g_const * central_mass / r).sqrt() * SETTINGS.init_vel;
             let tangent = Vec3::new(-pos.y, pos.x, 0.0).normalize_or_zero();
             let vel = tangent * orbital_speed;
-            
-            // Smaller mass range for stability
-            let mass = rng.random::<f32>() * 50.0 + 50.0;
-            
-            Particle::new(1000.0, pos, vel, Vec3::ZERO)
-        })
-        .collect();
 
-    out.push(Particle::new(100000., Vec3::ZERO, Vec3::ZERO, Vec3::ZERO));
-    return out;
+            Particle::new(SETTINGS.mass, pos, vel, Vec3::ZERO)
+        })
+        .collect()
 }
 
 pub struct Particle {
@@ -184,19 +264,16 @@ impl Particle {
         let r_sq = r_vec.dot(r_vec).max(EPSILON_SQ);
 
         // Combined magnitude and direction calculation
-        let force_over_r3 = G_CONST * self.mass * other.mass / (r_sq * r_sq.sqrt());
+        let force_over_r3 = SETTINGS.g_const * self.mass * other.mass / (r_sq * r_sq.sqrt());
 
         r_vec * force_over_r3
     }
 
     /// Propogate force accumulated over a tick into movement.
     pub fn tick(&mut self, force: &Vec3) {
-        let new_acc = force / self.mass;
-        
         // Simple Euler integration (more stable for this system)
-        self.vel += new_acc * DT;
-        self.pos += self.vel * DT;
-        
-        self.acc = new_acc;
+        self.acc = force / self.mass;
+        self.vel += self.acc * SETTINGS.dt;
+        self.pos += self.vel * SETTINGS.dt;
     }
 }
