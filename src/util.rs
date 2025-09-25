@@ -1,4 +1,37 @@
-fn load_settings() -> Settings {
+use serde::{Serialize,  Deserialize};
+use std::path::PathBuf;
+use std::env;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Settings {
+    pub num_particles: usize,
+    pub frames_total: usize,
+    pub frames_per_file: usize,
+    pub dt: f32,
+    pub arena: f32,
+    pub g_const: f32,
+    pub mass: f32,
+    pub init_vel: f32,
+    pub out_path: PathBuf,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            num_particles: 12000,
+            frames_total: 10000,
+            frames_per_file: 100,
+            dt: 1.0 / 180.0,
+            arena: 100.0,
+            g_const: 0.01,
+            mass: 1000.,
+            init_vel: 4.5,
+            out_path: PathBuf::from(""), // initialized properly in load_settings
+        }
+    }
+}
+
+pub fn load_settings() -> Settings {
     let mut settings = match std::fs::read_to_string("settings.json") {
         Ok(content) => match serde_json::from_str::<Settings>(&content) {
             Ok(settings) => {
