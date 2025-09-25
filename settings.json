@@ -1,7 +1,7 @@
 {
-  "num_particles": 12000,
-  "frames_total": 10000,
-  "frames_per_file": 100,
+  "num_particles": 1000,
+  "frames_total": 500,
+  "frames_per_file": 500,
   "dt": 0.0055555557,
   "arena": 100.0,
   "g_const": 0.01,

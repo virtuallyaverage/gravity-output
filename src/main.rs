@@ -11,6 +11,10 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, RwLock};
 use std::time::Instant;
 
+mod util;
+
+use util::load_settings;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub num_particles: usize,
