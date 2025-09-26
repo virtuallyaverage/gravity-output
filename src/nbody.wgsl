@@ -24,7 +24,6 @@ fn main(
         let pos_i = particles[idx].pos;
         let mass_i = particles[idx].mass;
         
-        // Use shared memory for better performance
         var shared_particles: array<vec4<f32>, WORKGROUP_SIZE>;
         
         // Process in tiles
