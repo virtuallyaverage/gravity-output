@@ -1,6 +1,10 @@
 use serde::{Serialize,  Deserialize};
 use std::path::PathBuf;
 use std::env;
+use glam::Vec3;
+
+use super::{Particle, SETTINGS};
+use rand::prelude::*;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
@@ -29,6 +33,34 @@ impl Default for Settings {
             out_path: PathBuf::from(""), // initialized properly in load_settings
         }
     }
+}
+
+/// handles initial distribution and velocity
+pub fn init_particles() -> Vec<Particle> {
+    let mut rng = rand::rng();
+
+    (0..SETTINGS.num_particles)
+        .map(|_| {
+            // Random spherical distribution
+            let r = SETTINGS.arena * (rng.random::<f32>().powf(1.0 / 3.0)); // Avoid center
+            let theta = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
+            let phi = (rng.random::<f32>() * 2.0 - 1.0).acos();
+
+            let pos = Vec3::new(
+                r * phi.sin() * theta.cos(),
+                r * phi.sin() * theta.sin(),
+                r * phi.cos(),
+            );
+
+            // Calculate orbital velocity for a central mass system
+            let central_mass = SETTINGS.num_particles as f32 * 5.0; // random numbers go brrr
+            let orbital_speed = (SETTINGS.g_const * central_mass / r).sqrt() * SETTINGS.init_vel;
+            let tangent = Vec3::new(-pos.y, pos.x, 0.0).normalize_or_zero();
+            let vel = tangent * orbital_speed;
+
+            Particle::new(SETTINGS.mass, pos, vel, Vec3::ZERO)
+        })
+        .collect()
 }
 
 pub fn load_settings() -> Settings {
