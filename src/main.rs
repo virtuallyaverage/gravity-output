@@ -4,7 +4,7 @@ use flate2::write::GzEncoder;
 use glam::Vec3;
 use rayon::prelude::*;
 use std::io::Write;
-use std::sync::{LazyLock, RwLock, atomic::{AtomicUsize, Ordering}};
+use std::sync::{LazyLock, RwLock};
 use std::time::Instant;
 
 mod util;
@@ -16,97 +16,50 @@ static PARTICLES: LazyLock<RwLock<Vec<Particle>>> = LazyLock::new(|| {
     println!("Done with particle init");
     RwLock::new(particles)
 });
-static PAIRS: LazyLock<Vec<(usize, usize)>> = LazyLock::new(|| {
-    let mut pairs: Vec<(usize, usize)> = vec![];
-    // only need to allocate half of them (not including diagonal)
-    for i in 0..SETTINGS.num_particles {
-        for j in (i + 1)..SETTINGS.num_particles {
-            pairs.push((i, j));
-        }
-    }
-    pairs
-});
-static FORCE_LUT_FLAT: LazyLock<Vec<Vec3>> = LazyLock::new(|| {
-    vec![Vec3::ZERO; SETTINGS.num_particles * SETTINGS.num_particles]
-});
 
-#[inline]
-fn get_force_index(col: usize, row: usize) -> usize {
-    col * SETTINGS.num_particles + row
-}
-
-/// how many pairs each thread should work on at a time
-pub const LUT_CHUNK_SIZE: usize = 1000;
-/// Provides the next list of chunks to process.
-/// 
-/// Would ideally not have to allocate
-pub struct ChunkManager {
-    next_chunk_idx: AtomicUsize,
-    total_chunks: usize,
-}
-
-impl ChunkManager {
-    pub fn new() -> Self {
-        let total_pairs = PAIRS.len();
-        Self {
-            next_chunk_idx: AtomicUsize::new(0),
-            total_chunks: (total_pairs + LUT_CHUNK_SIZE - 1) / LUT_CHUNK_SIZE,
+/// Direct force accumulation - no LUT needed
+fn process_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: usize) {
+    for frame in frame_list.iter_mut() {
+        let num_particles = SETTINGS.num_particles;
+        
+        // Single read lock for snapshot
+        let particles: Vec<Particle> = PARTICLES.read().unwrap().clone();
+        
+        // Thread-local force accumulation
+        let forces = (0..num_particles)
+            .into_par_iter()
+            .fold(
+                || vec![Vec3::ZERO; num_particles],
+                |mut thread_forces, i| {
+                    // Only compute j > i (upper triangle)
+                    for j in (i + 1)..num_particles {
+                        let influence = particles[i].get_influence(&particles[j]);
+                        thread_forces[i] += influence;
+                        thread_forces[j] -= influence;
+                    }
+                    thread_forces
+                }
+            )
+            .reduce(
+                || vec![Vec3::ZERO; num_particles],
+                |mut acc, thread_forces| {
+                    for (i, force) in thread_forces.iter().enumerate() {
+                        acc[i] += *force;
+                    }
+                    acc
+                }
+            );
+        
+        // Single write lock for update
+        {
+            let mut particles_mut = PARTICLES.write().unwrap();
+            for (idx, (force, out_pos)) in forces.iter().zip(frame.iter_mut()).enumerate() {
+                particles_mut[idx].tick(force);
+                *out_pos = particles_mut[idx].pos;
+            }
         }
     }
     
-    /// Returns (start_idx, end_idx) into PAIRS array
-    /// No allocations, just index math
-    pub fn next_chunk(&self) -> Option<(usize, usize)> {
-        let chunk_idx = self.next_chunk_idx.fetch_add(1, Ordering::Relaxed);
-        if chunk_idx >= self.total_chunks {
-            return None;
-        }
-        
-        let start = chunk_idx * LUT_CHUNK_SIZE;
-        let end = ((chunk_idx + 1) * LUT_CHUNK_SIZE).min(PAIRS.len());
-        Some((start, end))
-    }
-}
-
-/// process a single files worth of frames.
-fn process_frame_group(frame_list: &mut Vec<Vec<Vec3>>, batch_num: usize) {
-
-    for frame in frame_list.iter_mut() {
-        let chunk_manager = ChunkManager::new();
-        // Fill each force pair in the look up table
-        // needs to replace this with a more effecient version with 1Mil+ num-particles
-        // doesn't work effeciently.
-
-        (0..rayon::current_num_threads()).into_par_iter().for_each(|_| {
-            let particles = PARTICLES.read().unwrap();
-            
-            while let Some((start, end)) = chunk_manager.next_chunk() {
-                for idx in start..end {
-                    let (col_idx, row_idx) = PAIRS[idx];
-                    let result = particles[col_idx].get_influence(&particles[row_idx]);
-                    
-                    unsafe {
-                        let ptr = FORCE_LUT_FLAT.as_ptr() as *mut Vec3;
-                        *ptr.add(get_force_index(col_idx, row_idx)) = result;
-                        *ptr.add(get_force_index(row_idx, col_idx)) = -result;
-                    }
-                }
-            }
-        });
-
-        // propagate force and store result
-        {
-            let mut particles = PARTICLES.write().unwrap();
-            for (idx, out_pos) in frame.iter_mut().enumerate() {
-                let part = particles.get_mut(idx).unwrap();
-                let start = idx * SETTINGS.num_particles;
-                let force = FORCE_LUT_FLAT[start..start + SETTINGS.num_particles].iter().copied().sum();
-                part.tick(&force);
-                *out_pos = part.pos;
-            }
-        }
-    }
-
     let start = Instant::now();
     write_frame_group(frame_list, &batch_num);
     println!("Took to save: {}", start.elapsed().as_secs_f32());
@@ -157,6 +110,7 @@ fn main() {
     println!("Finished!");
 }
 
+#[derive(Clone)]
 pub struct Particle {
     mass: f32,
     pos: Vec3,

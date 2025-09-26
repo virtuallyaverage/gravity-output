@@ -1,5 +1,5 @@
 {
-  "num_particles": 5000,
+  "num_particles": 17000,
   "frames_total": 2000,
   "frames_per_file": 500,
   "dt": 0.0055555557,
