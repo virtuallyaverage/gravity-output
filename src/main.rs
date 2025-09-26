@@ -7,6 +7,7 @@ use std::io::Write;
 use std::sync::{LazyLock, RwLock};
 use std::time::Instant;
 
+
 mod util;
 use util::{Settings, init_particles, load_settings};
 
