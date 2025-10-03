@@ -9,7 +9,7 @@ struct Particle {
 @group(0) @binding(1) var<storage, read_write> forces: array<vec4<f32>>;
 
 const WORKGROUP_SIZE: u32 = 64u;
-const G_CONST: f32 = 0.01;
+const G_CONST: f32 = 0.11;
 
 @compute @workgroup_size(WORKGROUP_SIZE)
 fn main(

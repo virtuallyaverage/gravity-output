@@ -1,11 +1,11 @@
 {
-  "num_particles": 5000,
+  "num_particles": 10000,
   "frames_total": 10000,
-  "frames_per_file": 500,
+  "frames_per_file": 5,
   "dt": 0.0055555557,
   "arena": 100.0,
-  "g_const": 0.01,
+  "g_const": 1.0,
   "mass": 1000.0,
-  "init_vel": 1.0,
+  "init_vel": 0.5,
   "out_path": "\\output"
 }
